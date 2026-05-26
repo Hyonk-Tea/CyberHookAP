@@ -1,0 +1,66 @@
+# Build outputs
+/bin/
+/obj/
+/dist/
+/cyberhookapworld/
+/Docs/
+/tools/
+
+# Local research / scratch space
+/scratch/
+
+# Python caches and test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# IDE / editor files
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# OS cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local logs / temporary dumps
+*.log
+*.tmp
+*.bak
+*.orig
+
+# Generated runtime or release-side config copies
+settings.local.json
+
+# Keep vendor source, but ignore local build outputs inside vendored deps
+/vendor/**/bin/
+/vendor/**/obj/
+/vendor/**/.vs/
+
+# If the repo is initialized from the game root by mistake, keep local runtime data out
+/MelonLoader/
+/Mods/
+/Plugins/
+/UserData/
+/UserLibs/
+/CyberHook_Data/
+/MonoBleedingEdge/
+/CyberHook.exe
+/UnityPlayer.dll
+/UnityCrashHandler64.exe
+/version.dll
+/tmp_*.txt
+/tmp_*.ps1
+
+# Local-only helper outputs not needed for the client repo
+/generated/ap_anchor_gaps.json
+/generated/ap_goals.json
+/generated/ap_items.json
+/generated/ap_summary.md
+/generated/ap_world_thresholds.json
+/scripts/generate_ap_tables.ps1
