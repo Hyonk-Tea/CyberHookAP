@@ -27,6 +27,7 @@
       <HintPath>..\MelonLoader\net35\Newtonsoft.Json.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="System.Drawing" />
     <Reference Include="GlobalAssembly">
       <HintPath>..\CyberHook_Data\Managed\GlobalAssembly.dll</HintPath>
       <Private>false</Private>
@@ -89,6 +90,9 @@
     </EmbeddedResource>
     <EmbeddedResource Include="generated\ap_runtime.json">
       <LogicalName>CyberHookAP.Runtime.ap_runtime.json</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="coolimage.gif">
+      <LogicalName>CyberHookAP.Runtime.ui_patch.bin</LogicalName>
     </EmbeddedResource>
   </ItemGroup>
 </Project>

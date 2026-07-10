@@ -46,6 +46,9 @@ namespace CyberHookAP
         internal const int MinProgressiveLevel = 0;
         internal const int MaxProgressiveLevel = 4;
 
+        internal const int FinalWorldIndex = 6;
+        internal const string OneMoreTimeLevelUniqueId = "4aab430c-3066-4207-9bf0-f266109d9978";
+
         internal static bool IsExcludedLevel(string levelUniqueId)
         {
             return !string.IsNullOrEmpty(levelUniqueId) && ExcludedLevelIds.Contains(levelUniqueId);

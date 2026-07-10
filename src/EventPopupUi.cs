@@ -32,6 +32,7 @@ namespace CyberHookAP
 
         private Canvas _canvas;
         private CanvasGroup _canvasGroup;
+        private CanvasGroup _levelCanvasGroup;
         private RectTransform _panelRoot;
         private RectTransform _logContent;
         private ScrollRect _scrollRect;
@@ -46,6 +47,14 @@ namespace CyberHookAP
         private float _lastActivityTime;
         private string _lastStatus = "Disconnected";
         private Action<string> _commandHandler;
+
+        private RectTransform _levelPanelRoot;
+        private TextMeshProUGUI _levelNameText;
+        private TextMeshProUGUI _levelClearText;
+        private TextMeshProUGUI _levelBestText;
+        private TextMeshProUGUI _levelStar1Text;
+        private TextMeshProUGUI _levelStar2Text;
+        private TextMeshProUGUI _levelStar3Text;
 
         internal static EventPopupUi Instance
         {
@@ -311,6 +320,97 @@ namespace CyberHookAP
             _scrollRect.vertical = true;
             _scrollRect.movementType = ScrollRect.MovementType.Clamped;
             _scrollRect.scrollSensitivity = 24f;
+
+            GameObject levelPanelObj = CreateUiObject("LevelInfoPanel", gameObject.transform);
+            _levelPanelRoot = levelPanelObj.AddComponent<RectTransform>();
+            _levelPanelRoot.anchorMin = new Vector2(0f, 1f);
+            _levelPanelRoot.anchorMax = new Vector2(0f, 1f);
+            _levelPanelRoot.pivot = new Vector2(0f, 1f);
+            _levelPanelRoot.anchoredPosition = new Vector2(28f, -28f);
+            _levelPanelRoot.sizeDelta = new Vector2(350f, 110f);
+
+            Image levelPanelBg = levelPanelObj.AddComponent<Image>();
+            levelPanelBg.color = new Color(0.03f, 0.06f, 0.07f, 0.25f);
+
+            Outline levelPanelOutline = levelPanelObj.AddComponent<Outline>();
+            levelPanelOutline.effectColor = new Color(0.16f, 0.30f, 0.33f, 0.85f);
+            levelPanelOutline.effectDistance = new Vector2(1f, -1f);
+
+            _levelCanvasGroup = levelPanelObj.AddComponent<CanvasGroup>();
+            _levelCanvasGroup.alpha = 1f;
+
+            GameObject levelHeaderObj = CreateUiObject("LevelHeader", levelPanelObj.transform);
+            RectTransform levelHeaderRect = levelHeaderObj.AddComponent<RectTransform>();
+            levelHeaderRect.anchorMin = new Vector2(0f, 1f);
+            levelHeaderRect.anchorMax = new Vector2(1f, 1f);
+            levelHeaderRect.pivot = new Vector2(0.5f, 1f);
+            levelHeaderRect.anchoredPosition = Vector2.zero;
+            levelHeaderRect.sizeDelta = new Vector2(0f, 30f);
+
+            Image levelHeaderBg = levelHeaderObj.AddComponent<Image>();
+            levelHeaderBg.color = new Color(0.05f, 0.09f, 0.10f, 0.25f);
+
+            _levelNameText = CreateText("LevelName", levelHeaderObj.transform, string.Empty, 17f, FontStyles.Bold);
+            RectTransform levelNameRect = _levelNameText.rectTransform;
+            levelNameRect.anchorMin = new Vector2(0f, 0f);
+            levelNameRect.anchorMax = new Vector2(0f, 1f);
+            levelNameRect.pivot = new Vector2(0f, 0.5f);
+            levelNameRect.anchoredPosition = new Vector2(20f, 0f);
+            levelNameRect.sizeDelta = new Vector2(300f, 0f);
+            _levelNameText.alignment = TextAlignmentOptions.MidlineLeft;
+            _levelNameText.color = new Color(0.84f, 0.96f, 0.95f, 1f);
+
+            _levelClearText = CreateText("ClearStatus", levelHeaderObj.transform, string.Empty, 13f, FontStyles.Bold);
+            RectTransform clearRect = _levelClearText.rectTransform;
+            clearRect.anchorMin = new Vector2(1f, 0f);
+            clearRect.anchorMax = new Vector2(1f, 1f);
+            clearRect.pivot = new Vector2(1f, 0.5f);
+            clearRect.anchoredPosition = new Vector2(-44f, 0f);
+            clearRect.sizeDelta = new Vector2(120f, 0f);
+            _levelClearText.alignment = TextAlignmentOptions.MidlineRight;
+
+            GameObject levelBodyObj = CreateUiObject("LevelBody", levelPanelObj.transform);
+            RectTransform levelBodyRect = levelBodyObj.AddComponent<RectTransform>();
+            levelBodyRect.anchorMin = new Vector2(0f, 0f);
+            levelBodyRect.anchorMax = new Vector2(1f, 1f);
+            levelBodyRect.offsetMin = new Vector2(12f, 4f);
+            levelBodyRect.offsetMax = new Vector2(-12f, -34f);
+
+            _levelBestText = CreateText("BestTime", levelBodyObj.transform, string.Empty, 15f, FontStyles.Normal);
+            RectTransform bestRect = _levelBestText.rectTransform;
+            bestRect.anchorMin = new Vector2(0f, 0.75f);
+            bestRect.anchorMax = new Vector2(1f, 1f);
+            bestRect.offsetMin = Vector2.zero;
+            bestRect.offsetMax = Vector2.zero;
+            _levelBestText.alignment = TextAlignmentOptions.MidlineLeft;
+            _levelBestText.color = new Color(0.82f, 0.95f, 0.90f, 1f);
+
+            _levelStar1Text = CreateText("Star1", levelBodyObj.transform, string.Empty, 15f, FontStyles.Normal);
+            RectTransform star1Rect = _levelStar1Text.rectTransform;
+            star1Rect.anchorMin = new Vector2(0f, 0.50f);
+            star1Rect.anchorMax = new Vector2(1f, 0.75f);
+            star1Rect.offsetMin = Vector2.zero;
+            star1Rect.offsetMax = Vector2.zero;
+            _levelStar1Text.alignment = TextAlignmentOptions.MidlineLeft;
+            _levelStar1Text.color = new Color(0.55f, 0.80f, 0.50f, 1f);
+
+            _levelStar2Text = CreateText("Star2", levelBodyObj.transform, string.Empty, 15f, FontStyles.Normal);
+            RectTransform star2Rect = _levelStar2Text.rectTransform;
+            star2Rect.anchorMin = new Vector2(0f, 0.25f);
+            star2Rect.anchorMax = new Vector2(1f, 0.50f);
+            star2Rect.offsetMin = Vector2.zero;
+            star2Rect.offsetMax = Vector2.zero;
+            _levelStar2Text.alignment = TextAlignmentOptions.MidlineLeft;
+            _levelStar2Text.color = new Color(0.55f, 0.80f, 0.65f, 1f);
+
+            _levelStar3Text = CreateText("Star3", levelBodyObj.transform, string.Empty, 15f, FontStyles.Normal);
+            RectTransform star3Rect = _levelStar3Text.rectTransform;
+            star3Rect.anchorMin = new Vector2(0f, 0f);
+            star3Rect.anchorMax = new Vector2(1f, 0.25f);
+            star3Rect.offsetMin = Vector2.zero;
+            star3Rect.offsetMax = Vector2.zero;
+            _levelStar3Text.alignment = TextAlignmentOptions.MidlineLeft;
+            _levelStar3Text.color = new Color(0.40f, 0.65f, 0.85f, 1f);
         }
 
         private void AppendLogLine(PopupKind kind, string message)
@@ -464,7 +564,11 @@ namespace CyberHookAP
 
             if (_preferredFont == null)
             {
-                TryCapturePreferredFont();
+                var mod = CyberHookAP.CyberHookApMod.Instance;
+                if (mod == null || mod.Settings == null || !mod.Settings.AccessibleFont)
+                {
+                    TryCapturePreferredFont();
+                }
             }
 
             if (_preferredFont != null)
@@ -478,6 +582,12 @@ namespace CyberHookAP
 
             RefreshResolvedFont(_titleText);
             RefreshResolvedFont(_statusText);
+            RefreshResolvedFont(_levelNameText);
+            RefreshResolvedFont(_levelClearText);
+            RefreshResolvedFont(_levelBestText);
+            RefreshResolvedFont(_levelStar1Text);
+            RefreshResolvedFont(_levelStar2Text);
+            RefreshResolvedFont(_levelStar3Text);
             if (_inputField != null)
             {
                 RefreshResolvedFont(_inputField.textComponent as TextMeshProUGUI);
@@ -671,6 +781,39 @@ namespace CyberHookAP
             label.raycastTarget = false;
 
             return button;
+        }
+
+        internal void SetLevelInfo(string levelName, string clearStatus, string bestTime, string star1, string star2, string star3)
+        {
+            if (_levelPanelRoot == null)
+            {
+                return;
+            }
+
+            bool visible = !string.IsNullOrEmpty(levelName);
+            _levelPanelRoot.gameObject.SetActive(visible);
+            if (!visible)
+            {
+                return;
+            }
+
+            if (_levelNameText != null) _levelNameText.text = levelName ?? string.Empty;
+            if (_levelClearText != null)
+            {
+                _levelClearText.text = clearStatus ?? string.Empty;
+                if (!string.IsNullOrEmpty(clearStatus) && clearStatus.IndexOf("CLEAR", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    _levelClearText.color = new Color(0.35f, 0.93f, 0.59f, 1f);
+                }
+                else
+                {
+                    _levelClearText.color = new Color(0.6f, 0.6f, 0.6f, 1f);
+                }
+            }
+            if (_levelBestText != null) _levelBestText.text = "Best " + (bestTime ?? "--");
+            if (_levelStar1Text != null) _levelStar1Text.text = "1 star:  " + (star1 ?? "--");
+            if (_levelStar2Text != null) _levelStar2Text.text = "2 stars: " + (star2 ?? "--");
+            if (_levelStar3Text != null) _levelStar3Text.text = "3 stars: " + (star3 ?? "--");
         }
     }
 }

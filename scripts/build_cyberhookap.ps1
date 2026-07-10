@@ -1,6 +1,10 @@
 [CmdletBinding()]
 param(
-    [switch]$Install
+    [switch]$Install,
+    [string]$OutputName = "CyberHookAP.dll",
+    [string]$OutputDir = "",
+    [switch]$IncludeAuxVisual,
+    [switch]$SkipVendorBuild
 )
 
 $ErrorActionPreference = "Stop"
@@ -76,24 +80,31 @@ $vendorOutputDir = Join-Path $vendorRoot "build"
 New-Item -ItemType Directory -Force -Path $vendorOutputDir | Out-Null
 
 $vendorOutput = Join-Path $vendorOutputDir "Archipelago.MultiClient.Net.dll"
-$vendorSources = Get-ChildItem (Join-Path $vendorRoot "Archipelago.MultiClient.Net") -Recurse -Filter *.cs |
-    Sort-Object FullName |
-    ForEach-Object { $_.FullName }
-$vendorReferences = @(
-    (Join-Path $gameRoot "MelonLoader\net35\Newtonsoft.Json.dll"),
-    (Join-Path $vendorRoot "DLLs\websocket-sharp.dll")
-)
+if (-not $SkipVendorBuild)
+{
+    $vendorSources = Get-ChildItem (Join-Path $vendorRoot "Archipelago.MultiClient.Net") -Recurse -Filter *.cs |
+        Sort-Object FullName |
+        ForEach-Object { $_.FullName }
+    $vendorReferences = @(
+        (Join-Path $gameRoot "MelonLoader\net35\Newtonsoft.Json.dll"),
+        (Join-Path $vendorRoot "DLLs\websocket-sharp.dll")
+    )
 
-Invoke-CSharpCompile `
-    -OutputAssembly $vendorOutput `
-    -SourceFiles $vendorSources `
-    -References $vendorReferences `
-    -Defines @("NET35")
+    Invoke-CSharpCompile `
+        -OutputAssembly $vendorOutput `
+        -SourceFiles $vendorSources `
+        -References $vendorReferences `
+        -Defines @("NET35")
+}
 
 $modOutputDir = Join-Path $projectRoot "bin"
+if (![string]::IsNullOrEmpty($OutputDir))
+{
+    $modOutputDir = $OutputDir
+}
 New-Item -ItemType Directory -Force -Path $modOutputDir | Out-Null
 
-$modOutput = Join-Path $modOutputDir "CyberHookAP.dll"
+$modOutput = Join-Path $modOutputDir $OutputName
 $modSources = Get-ChildItem (Join-Path $projectRoot "src") -Recurse -Filter *.cs |
     Sort-Object FullName |
     ForEach-Object { $_.FullName }
@@ -103,6 +114,7 @@ $modReferences = @(
     (Join-Path $gameRoot "MelonLoader\net35\0Harmony.dll"),
     (Join-Path $gameRoot "MelonLoader\net35\MelonLoader.dll"),
     (Join-Path $gameRoot "MelonLoader\net35\Newtonsoft.Json.dll"),
+    "C:\Windows\Microsoft.NET\Framework\v4.0.30319\System.Drawing.dll",
     (Join-Path $gameRoot "CyberHook_Data\Managed\GlobalAssembly.dll"),
     (Join-Path $gameRoot "CyberHook_Data\Managed\UnityEngine.dll"),
     (Join-Path $gameRoot "CyberHook_Data\Managed\UnityEngine.CoreModule.dll"),
@@ -122,10 +134,41 @@ $modResources += ((Join-Path $projectRoot "generated\ap_levels.json") + "|CyberH
 $modResources += ((Join-Path $projectRoot "generated\cube_counts_by_level.csv") + "|CyberHookAP.Runtime.cube_counts_by_level.csv")
 $modResources += ((Join-Path $projectRoot "generated\ap_runtime.json") + "|CyberHookAP.Runtime.ap_runtime.json")
 
+$bootstrapDir = Join-Path $projectRoot "bootstrap"
+if (Test-Path (Join-Path $bootstrapDir "GameData.shd"))
+{
+    $modResources += ((Join-Path $bootstrapDir "GameData.shd") + "|CyberHookAP.Runtime.bootstrap_gamedata.bin")
+}
+$bootstrapLevelsDir = Join-Path $bootstrapDir "Levels"
+$bootstrapLevelFiles = @(
+    "LevelData # 849d59bb-1b8a-41e7-b16c-489127224e46.shl",
+    "LevelData # be8c2fc4-4a4f-4fa2-8048-916c64c4e5b9.shl",
+    "LevelData # 2b9c4312-d2a0-44c0-a3d6-7332809de8a3.shl"
+)
+if (Test-Path $bootstrapLevelsDir)
+{
+    for ($i = 0; $i -lt $bootstrapLevelFiles.Count; $i++)
+    {
+        $path = Join-Path $bootstrapLevelsDir $bootstrapLevelFiles[$i]
+        if (Test-Path $path)
+        {
+            $modResources += ($path + "|CyberHookAP.Runtime.bootstrap_level_" + $i)
+        }
+    }
+}
+
+$modDefines = @()
+if ($IncludeAuxVisual)
+{
+    $modDefines += "IMPORTANTUPDATE"
+    $modResources += ((Join-Path $projectRoot "coolimage.gif") + "|CyberHookAP.Runtime.ui_patch.bin")
+}
+
 Invoke-CSharpCompile `
     -OutputAssembly $modOutput `
     -SourceFiles $modSources `
     -References $modReferences `
+    -Defines $modDefines `
     -Resources $modResources
 
 if ($Install)

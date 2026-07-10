@@ -2,6 +2,16 @@
 /bin/
 /obj/
 /dist/
+/coolimage.gif
+*.dll
+*.pdb
+*.exe
+*.msi
+*.nupkg
+*.zip
+
+# Bootstrap save data
+/bootstrap/
 /cyberhookapworld/
 /Docs/
 /tools/

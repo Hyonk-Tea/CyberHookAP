@@ -12,9 +12,12 @@
 ## Installing the Archipelago mod for Cyber Hook
 **To set up Archipelago and host a multiworld, refer to the** [Official Archipelago Setup Guide](https://archipelago.gg/tutorial/Archipelago/setup_en)
 
-1. Follow the instructions on the MelonLoader page, to install MelonLoader to your Cyber Hook directory.
-2. Download the Cyber Hook Archipelago mod from the releases page.
-3. Extract the `cyberhookap.zip` into your Cyber Hook game root. For most people, this will be in `steamapps/common/Cyber Hook/`.
+**CRITICAL FIRST STEP:**
+1. Create a copy of your Cyber Hook game directory. For most people, your game directory will be `steamapps/common/Cyber Hook/`.
+- I suggest naming the folder `Cyber Hook AP`.
+2. Follow the instructions on the MelonLoader page, to install MelonLoader to your cloned Cyber Hook directory.
+3. Download the Cyber Hook Archipelago mod from the releases page.
+4. Extract the `cyberhookap.zip` into your cloned Cyber Hook game root.
 - DO NOT extract it into a folder! The .zip must be extracted DIRECTLY, so the Mods/ folder properly deposits.
 
 ## Connecting to the Archipelago server

@@ -17,6 +17,8 @@ namespace CyberHookAP
         public string SessionSeedName = string.Empty;
         public string SessionSlotName = string.Empty;
         public bool GoalReported = false;
+        public bool HasFinalLevelComplete = false;
+        public Dictionary<string, float> LevelBestTimes = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
         public HashSet<string> CompletedChecks = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         public HashSet<string> KnownCubeIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         public HashSet<string> KnownCollectibleIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -37,6 +39,8 @@ namespace CyberHookAP
                 SessionSeedName = SessionSeedName,
                 SessionSlotName = SessionSlotName,
                 GoalReported = GoalReported,
+                HasFinalLevelComplete = HasFinalLevelComplete,
+                LevelBestTimes = new Dictionary<string, float>(LevelBestTimes, StringComparer.OrdinalIgnoreCase),
                 CompletedChecks = new HashSet<string>(CompletedChecks, StringComparer.OrdinalIgnoreCase),
                 KnownCubeIds = new HashSet<string>(KnownCubeIds, StringComparer.OrdinalIgnoreCase),
                 KnownCollectibleIds = new HashSet<string>(KnownCollectibleIds, StringComparer.OrdinalIgnoreCase)
@@ -69,6 +73,8 @@ namespace CyberHookAP
             ProgressiveReach = 0;
             LastReceivedItemIndex = 0;
             GoalReported = false;
+            HasFinalLevelComplete = false;
+            LevelBestTimes.Clear();
         }
 
         public void ResetForNewSession(string seedName, string slotName)

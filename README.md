@@ -7,3 +7,8 @@ Read `setup_en.md`.
 - **Skylighter** for figuring out a lot of the logic.
 - **KitLemonfoot** for creating the Marble It Up! Ultra .apworld that our .apworld was based on.
 - **icsharpcode** for creating ILSpy, a tool for decompiling C# code.
+- **ArchipelagoMW** for creating the [Archipelago dotnet library](https://github.com/ArchipelagoMW/Archipelago.MultiClient.Net) used in this mod.
+<<<<<<< HEAD
+=======
+
+>>>>>>> c61530b589f5179c2bda478285fa52fb20535e39

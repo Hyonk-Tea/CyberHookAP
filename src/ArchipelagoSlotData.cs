@@ -6,6 +6,8 @@ namespace CyberHookAP
 {
     internal sealed class ArchipelagoSlotData
     {
+        private const int FinalWorldIndex = 6;
+
         public int HighestRequiredRank = 0;
         public string GoalMode = string.Empty;
         public int GoalDiamondCount = 0;
@@ -14,7 +16,7 @@ namespace CyberHookAP
         public bool DeathLinkEnabled = false;
         public int DeathLinkAmnesty = 0;
 
-        internal static ArchipelagoSlotData FromToken(JToken slotDataToken, GeneratedApData data)
+        internal static ArchipelagoSlotData FromToken(JToken slotDataToken, GeneratedApData data, int indexWorldsAt)
         {
             ArchipelagoSlotData result = new ArchipelagoSlotData();
             if (slotDataToken == null || slotDataToken.Type != JTokenType.Object)
@@ -29,6 +31,7 @@ namespace CyberHookAP
             result.DeathLinkEnabled = ReadBool(obj, "death_link", "deathLink");
             result.DeathLinkAmnesty = ReadInt(obj, "death_link_amnesty", "deathLinkAmnesty");
             result.WorldUnlockOrder = ReadWorldOrder(
+                indexWorldsAt,
                 obj,
                 "world_order",
                 "worldOrder",
@@ -38,7 +41,7 @@ namespace CyberHookAP
                 "shuffledWorldOrder");
             if (result.WorldUnlockOrder.Count == 0)
             {
-                result.WorldUnlockOrder = ReadOrderedWorldFields(obj);
+                result.WorldUnlockOrder = ReadOrderedWorldFields(obj, indexWorldsAt);
             }
 
             JToken goalLevelsToken = ReadToken(obj, "goal_levels", "goalLevels", "chosen_goal_levels", "chosenGoalLevels");
@@ -94,40 +97,30 @@ namespace CyberHookAP
             return token != null && token.Type == JTokenType.Boolean ? (bool)token : false;
         }
 
-        private static List<int> ReadWorldOrder(JObject obj, params string[] keys)
+        private static List<int> ReadWorldOrder(int indexWorldsAt, JObject obj, params string[] keys)
         {
-            List<int> result = new List<int>();
             JToken token = ReadToken(obj, keys);
             if (token == null || token.Type != JTokenType.Array)
             {
-                return result;
+                return new List<int>();
             }
 
+            List<int> rawValues = new List<int>();
             foreach (JToken entry in token)
             {
-                int worldIndex;
-                if (TryResolveWorldIndex(entry, out worldIndex) && worldIndex >= 0 && worldIndex <= 6 && !result.Contains(worldIndex))
+                int rawValue;
+                if (TryReadRawWorldNumber(entry, out rawValue))
                 {
-                    result.Add(worldIndex);
+                    rawValues.Add(rawValue);
                 }
             }
 
-            if (result.Count == 6)
-            {
-                AppendMissingWorld(result);
-            }
-
-            if (result.Count != 7)
-            {
-                result.Clear();
-            }
-
-            return result;
+            return NormalizeWorldOrder(rawValues, indexWorldsAt);
         }
 
-        private static List<int> ReadOrderedWorldFields(JObject obj)
+        private static List<int> ReadOrderedWorldFields(JObject obj, int indexWorldsAt)
         {
-            List<int> result = new List<int>();
+            List<int> rawValues = new List<int>();
             string[] keys =
             {
                 "FirstWorld",
@@ -141,11 +134,33 @@ namespace CyberHookAP
             for (int i = 0; i < keys.Length; i++)
             {
                 JToken token = ReadToken(obj, keys[i]);
-                int worldIndex;
-                if (!TryResolveWorldIndex(token, out worldIndex) || result.Contains(worldIndex))
+                int rawValue;
+                if (!TryReadRawWorldNumber(token, out rawValue))
                 {
-                    result.Clear();
-                    return result;
+                    return new List<int>();
+                }
+
+                rawValues.Add(rawValue);
+            }
+
+            return NormalizeWorldOrder(rawValues, indexWorldsAt);
+        }
+
+        private static List<int> NormalizeWorldOrder(List<int> rawValues, int indexWorldsAt)
+        {
+            List<int> result = new List<int>();
+            if (rawValues == null || rawValues.Count == 0)
+            {
+                return result;
+            }
+
+            bool oneBased = DetermineOneBased(rawValues, indexWorldsAt);
+            for (int i = 0; i < rawValues.Count; i++)
+            {
+                int worldIndex = oneBased ? rawValues[i] - 1 : rawValues[i];
+                if (worldIndex < 0 || worldIndex > FinalWorldIndex || result.Contains(worldIndex))
+                {
+                    return new List<int>();
                 }
 
                 result.Add(worldIndex);
@@ -158,27 +173,82 @@ namespace CyberHookAP
 
             if (result.Count != 7)
             {
-                result.Clear();
+                return new List<int>();
             }
 
+            ForceFinalWorldLast(result);
             return result;
+        }
+
+        private static bool DetermineOneBased(List<int> rawValues, int indexWorldsAt)
+        {
+            if (indexWorldsAt == 0)
+            {
+                return false;
+            }
+
+            if (indexWorldsAt > 0)
+            {
+                return true;
+            }
+
+            bool containsZero = false;
+            bool containsSeven = false;
+            for (int i = 0; i < rawValues.Count; i++)
+            {
+                containsZero = containsZero || rawValues[i] == 0;
+                containsSeven = containsSeven || rawValues[i] == 7;
+            }
+
+            if (containsZero)
+            {
+                return false;
+            }
+
+            if (containsSeven)
+            {
+                return true;
+            }
+
+            return true;
         }
 
         private static void AppendMissingWorld(List<int> result)
         {
-            for (int worldIndex = 0; worldIndex <= 6; worldIndex++)
+            for (int worldIndex = 0; worldIndex <= FinalWorldIndex; worldIndex++)
             {
+                if (worldIndex == FinalWorldIndex)
+                {
+                    continue;
+                }
+
                 if (!result.Contains(worldIndex))
                 {
                     result.Add(worldIndex);
                     return;
                 }
             }
+
+            if (!result.Contains(FinalWorldIndex))
+            {
+                result.Add(FinalWorldIndex);
+            }
         }
 
-        private static bool TryResolveWorldIndex(JToken token, out int worldIndex)
+        private static void ForceFinalWorldLast(List<int> result)
         {
-            worldIndex = -1;
+            if (result == null)
+            {
+                return;
+            }
+
+            result.Remove(FinalWorldIndex);
+            result.Add(FinalWorldIndex);
+        }
+
+        private static bool TryReadRawWorldNumber(JToken token, out int rawValue)
+        {
+            rawValue = -1;
             if (token == null)
             {
                 return false;
@@ -186,20 +256,8 @@ namespace CyberHookAP
 
             if (token.Type == JTokenType.Integer)
             {
-                int value = (int)token;
-                if (value >= 0 && value <= 6)
-                {
-                    worldIndex = value;
-                    return true;
-                }
-
-                if (value >= 1 && value <= 7)
-                {
-                    worldIndex = value - 1;
-                    return true;
-                }
-
-                return false;
+                rawValue = (int)token;
+                return true;
             }
 
             string raw = token.Type == JTokenType.String ? (string)token : token.ToString();
@@ -218,25 +276,7 @@ namespace CyberHookAP
                 normalized = normalized.Substring("world".Length);
             }
 
-            int parsed;
-            if (!int.TryParse(normalized, out parsed))
-            {
-                return false;
-            }
-
-            if (parsed >= 0 && parsed <= 6)
-            {
-                worldIndex = parsed;
-                return true;
-            }
-
-            if (parsed >= 1 && parsed <= 7)
-            {
-                worldIndex = parsed - 1;
-                return true;
-            }
-
-            return false;
+            return int.TryParse(normalized, out rawValue);
         }
 
         private static JToken ReadToken(JObject obj, params string[] keys)

@@ -1,14 +1,17 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Drawing.Imaging;
 using System.IO;
+using System.Runtime.Serialization.Formatters.Binary;
 using HarmonyLib;
 using MelonLoader;
 using System.Reflection;
 using UnityEngine;
 using Newtonsoft.Json.Linq;
+using SD = System.Drawing;
 
-[assembly: MelonInfo(typeof(CyberHookAP.CyberHookApMod), "CyberHookAP", "0.1.0", "CyberHookAP")]
+[assembly: MelonInfo(typeof(CyberHookAP.CyberHookApMod), "CyberHookAP", "0.8.2", "HyonkTea")]
 [assembly: MelonGame(null, "Cyber Hook")]
 
 namespace CyberHookAP
@@ -63,6 +66,23 @@ namespace CyberHookAP
         private static readonly MethodInfo PlayerStateActionShootMethod =
             AccessTools.Method(typeof(PlayerState), "ActionShoot");
 
+        private const float ImportantUpdateRollIntervalSeconds = 0.75f;
+        private const double ImportantUpdateRollChance = 1.0 / 10000.0;
+        private const string EmbeddedAuxVisualResource = "CyberHookAP.Runtime.ui_patch.bin";
+        private const string BootstrapGameDataResource = "CyberHookAP.Runtime.bootstrap_gamedata.bin";
+        private static readonly string[] BootstrapLevelUuids =
+        {
+            "849d59bb-1b8a-41e7-b16c-489127224e46",
+            "be8c2fc4-4a4f-4fa2-8048-916c64c4e5b9",
+            "2b9c4312-d2a0-44c0-a3d6-7332809de8a3"
+        };
+        private const float StateSaveDebounceSeconds = 0.25f;
+#if IMPORTANTUPDATE
+        private const bool AuxVisualEnabled = true;
+#else
+        private const bool AuxVisualEnabled = false;
+#endif
+
         private enum TrapKind
         {
             None,
@@ -81,6 +101,7 @@ namespace CyberHookAP
             public bool HasRestoreGravity;
             public bool IsApplied;
             public PlayerController AppliedPlayer;
+            public int RemainingDeaths;
         }
 
         private static CyberHookApMod _instance;
@@ -112,7 +133,7 @@ namespace CyberHookAP
         private TrapRuntime _queuedTrap;
         private int _deathLinkAmnestyCounter;
         private bool _suppressOutgoingDeathLink;
-        private int _suppressedResetDeathLinks;
+        private float _deathLinkRestartSuppressUntil;
         private bool _deathLinkSequenceActive;
         private bool _pendingIncomingDeathLink;
         private string _pendingDeathLinkMessage = string.Empty;
@@ -146,6 +167,16 @@ namespace CyberHookAP
         private Vector3 _deathLinkHandParentLocalPosition = Vector3.zero;
         private readonly Queue<string> _powerupAnimationQueue = new Queue<string>();
         private bool _powerupAnimationActive;
+        private readonly System.Random _ambientRandom = new System.Random();
+        private readonly List<Texture2D> _ambientFrames = new List<Texture2D>();
+        private readonly List<float> _ambientFrameDurations = new List<float>();
+        private bool _ambientLoaded;
+        private float _ambientRollTimer;
+        private bool _ambientPlaying;
+        private int _ambientFrameIndex;
+        private float _ambientFrameRemainingSeconds;
+        private bool _stateDirty;
+        private float _nextStateSaveTime;
 
         internal static CyberHookApMod Instance
         {
@@ -172,6 +203,7 @@ namespace CyberHookAP
         {
             _instance = this;
             Directory.CreateDirectory(DataDirectory);
+            Directory.CreateDirectory(Path.Combine(DataDirectory, "Backups"));
 
             _settingsStore = new JsonFileStore<ModSettings>(Path.Combine(DataDirectory, "settings.json"));
             _stateStore = new JsonFileStore<ArchipelagoState>(Path.Combine(DataDirectory, "state.json"));
@@ -184,6 +216,10 @@ namespace CyberHookAP
             _saveProfiles = new SaveProfileManager(DataDirectory);
             _saveProfiles.Initialize(Settings);
             InitializeArchipelagoClient();
+            if (AuxVisualEnabled)
+            {
+                TryLoadAmbientVisual();
+            }
             _settingsStore.Save(Settings);
             _stateStore.Save(State);
 
@@ -202,12 +238,13 @@ namespace CyberHookAP
                 _apClient.Disconnect(true, string.Empty);
             }
 
-            PersistState();
+            FlushPendingState(true);
         }
 
         public override void OnUpdate()
         {
             EnsurePopupUi();
+            UpdateLevelInfoPanel();
 
             if (_apClient != null)
             {
@@ -220,14 +257,15 @@ namespace CyberHookAP
                 _saveProfiles.Tick();
             }
 
-            if (UnityEngine.Input.GetKeyDown(KeyCode.F2))
-            {
-                TriggerLocalDeathLinkPreview();
-            }
-
             UpdateTrapRuntime();
             UpdateDeathLinkRuntime();
             UpdatePowerupAnimationRuntime();
+            FlushPendingState(false);
+            if (AuxVisualEnabled)
+            {
+                UpdateAmbientRuntime();
+            }
+            UpdateRestoreBackupTriggers();
             TryReportGoalCompletion();
         }
 
@@ -243,7 +281,13 @@ namespace CyberHookAP
 
         public override void OnGUI()
         {
-            if (Event.current != null
+            if (AuxVisualEnabled)
+            {
+                DrawAmbientOverlay();
+            }
+
+            if (Settings != null && Settings.EnableDebugOverrides
+                && Event.current != null
                 && Event.current.type == EventType.KeyDown
                 && Event.current.keyCode == KeyCode.BackQuote)
             {
@@ -251,7 +295,7 @@ namespace CyberHookAP
                 Event.current.Use();
             }
 
-            if (Settings == null || !_showDebugMenu)
+            if (Settings == null || !_showDebugMenu || !Settings.EnableDebugOverrides)
             {
                 return;
             }
@@ -312,20 +356,51 @@ namespace CyberHookAP
 
         internal static void SafeLog(string message)
         {
-            MelonLogger.Msg("[CyberHookAP] " + message);
+            MelonLogger.Msg(message);
         }
 
         internal void PersistState()
         {
-            if (_stateStore != null && State != null)
+            if (_stateStore == null || State == null)
+            {
+                return;
+            }
+
+            if (!Application.isPlaying)
             {
                 _stateStore.Save(State);
+                _stateDirty = false;
+                return;
             }
+
+            _stateDirty = true;
+            _nextStateSaveTime = Time.unscaledTime + StateSaveDebounceSeconds;
+        }
+
+        private void FlushPendingState(bool force)
+        {
+            if (!_stateDirty || _stateStore == null || State == null)
+            {
+                return;
+            }
+
+            if (!force && Time.unscaledTime < _nextStateSaveTime)
+            {
+                return;
+            }
+
+            _stateStore.Save(State);
+            _stateDirty = false;
         }
 
         internal ArchipelagoState GetEffectiveState()
         {
             ArchipelagoState effective = State.Clone();
+
+            if (Settings == null || !Settings.EnableDebugOverrides)
+            {
+                return effective;
+            }
 
             if (Settings.DebugDiamonds > effective.ReceivedDiamonds)
             {
@@ -373,7 +448,7 @@ namespace CyberHookAP
             }
 
             _activeTrap.RemainingSeconds -= Time.unscaledDeltaTime;
-            if (_activeTrap.RemainingSeconds <= 0f)
+            if (_activeTrap.RemainingSeconds <= 0f || _activeTrap.RemainingDeaths <= 0)
             {
                 ClearTrapState(true);
                 TryActivateQueuedTrap();
@@ -466,16 +541,15 @@ namespace CyberHookAP
             trap.Kind = kind;
             trap.Name = itemName ?? kind.ToString();
             trap.Direction = Vector3.zero;
-            trap.MagnitudeScale = 1f;
+            trap.RemainingDeaths = 5;
 
             switch (kind)
             {
                 case TrapKind.RandomGravityDirection:
-                    trap.RemainingSeconds = UnityEngine.Random.Range(2f, 10f);
-                    trap.MagnitudeScale = 1f;
+                    trap.RemainingSeconds = UnityEngine.Random.Range(45f, 120f);
                     break;
                 case TrapKind.IncreasedGravity:
-                    trap.RemainingSeconds = UnityEngine.Random.Range(2f, 10f);
+                    trap.RemainingSeconds = UnityEngine.Random.Range(45f, 120f);
                     trap.MagnitudeScale = UnityEngine.Random.Range(0.25f, 2.5f);
                     break;
                 default:
@@ -507,54 +581,68 @@ namespace CyberHookAP
 
             trap.RestoreGravity = baselineGravity;
             trap.HasRestoreGravity = true;
-            trap.Direction = ResolveTrapDirection(trap.Kind, baselineGravity);
 
-            float baseMagnitude = GetVanillaGravityMagnitude(baselineGravity);
-            float magnitude = baseMagnitude * trap.MagnitudeScale;
-            if (magnitude < 0.1f)
+            Vector3 direction;
+            float magnitude;
+
+            if (trap.Kind == TrapKind.RandomGravityDirection)
             {
-                magnitude = Mathf.Max(baseMagnitude, 30f);
+                if (trap.Direction.sqrMagnitude < 0.001f)
+                {
+                    trap.Direction = UnityEngine.Random.onUnitSphere;
+                    if (trap.Direction.sqrMagnitude < 0.001f)
+                    {
+                        trap.Direction = baselineGravity.normalized;
+                    }
+                }
+
+                direction = trap.Direction.normalized;
+                magnitude = ReadBaseGravityModifierMagnitude();
+            }
+            else
+            {
+                direction = baselineGravity.normalized;
+                magnitude = Mathf.Clamp(ReadBaseGravityModifierMagnitude() * trap.MagnitudeScale, 0.25f, 10f);
             }
 
-            Vector3 appliedGravity = trap.Direction.normalized * magnitude;
+            if (magnitude < 0.1f)
+            {
+                magnitude = 1f;
+            }
+
+            Vector3 appliedGravity = direction * magnitude;
             ApplyGravity(player, appliedGravity);
             trap.IsApplied = true;
             trap.AppliedPlayer = player;
         }
 
-        private Vector3 ResolveTrapDirection(TrapKind kind, Vector3 baselineGravity)
+        private float ReadBaseGravityModifierMagnitude()
         {
-            if (kind == TrapKind.IncreasedGravity)
+            try
             {
-                return baselineGravity.normalized;
+                FieldInfo baseGravModField = AccessTools.Field(typeof(SO_PlayerData), "_baseGravityModifier");
+                if (baseGravModField != null)
+                {
+                    PlayerController player;
+                    if (TryGetLoadedPlayer(out player) && player != null && player.PlayerData != null)
+                    {
+                        object val = baseGravModField.GetValue(player.PlayerData);
+                        if (val is Vector3)
+                        {
+                            float mag = ((Vector3)val).magnitude;
+                            if (mag > 0.01f && mag < 100f)
+                            {
+                                return mag;
+                            }
+                        }
+                    }
+                }
+            }
+            catch
+            {
             }
 
-            Vector3 direction = UnityEngine.Random.onUnitSphere;
-            if (direction.sqrMagnitude < 0.01f)
-            {
-                direction = baselineGravity.sqrMagnitude > 0.001f
-                    ? baselineGravity.normalized
-                    : Vector3.down;
-            }
-
-            return direction.normalized;
-        }
-
-        private float GetVanillaGravityMagnitude(Vector3 baselineGravity)
-        {
-            float physicsMagnitude = Physics.gravity.magnitude;
-            if (physicsMagnitude > 0.1f && physicsMagnitude < 1000f)
-            {
-                return physicsMagnitude;
-            }
-
-            float baselineMagnitude = baselineGravity.magnitude;
-            if (baselineMagnitude > 0.1f && baselineMagnitude < 1000f)
-            {
-                return baselineMagnitude;
-            }
-
-            return 30f;
+            return 1f;
         }
 
         private void ClearTrapState(bool restoreGravity)
@@ -660,7 +748,7 @@ namespace CyberHookAP
                 return;
             }
 
-            Vector3 applied = gravity.sqrMagnitude > 0.001f ? gravity : new Vector3(0f, -30f, 0f);
+            Vector3 applied = gravity.sqrMagnitude > 0.001f ? gravity : new Vector3(0f, -1f, 0f);
             Vector3 up = -applied.normalized;
 
             try
@@ -985,23 +1073,48 @@ namespace CyberHookAP
                 return;
             }
 
+            _suppressOutgoingDeathLink = true;
+            bool killed = false;
+
             try
             {
                 PlayerState state = ActivePlayerStateProperty != null
                     ? ActivePlayerStateProperty.GetValue(player, null) as PlayerState
                     : null;
-                if (state == null || PlayerStateOnKillMethod == null)
+                if (state != null && PlayerStateOnKillMethod != null)
                 {
-                    return;
+                    PlayerStateOnKillMethod.Invoke(state, new object[] { player.gameObject });
+                    killed = true;
                 }
-
-                _suppressOutgoingDeathLink = true;
-                PlayerStateOnKillMethod.Invoke(state, new object[] { player.gameObject });
+                else
+                {
+                    SafeLog("DeathLink: PlayerStateOnKillMethod or ActivePlayerState not available.");
+                }
             }
             catch (Exception ex)
             {
+                SafeLog("DeathLink OnKill failed: " + ex.Message);
+            }
+
+            if (!killed)
+            {
+                try
+                {
+                    player.transform.position = new Vector3(
+                        player.transform.position.x,
+                        -1000f,
+                        player.transform.position.z);
+                    SafeLog("DeathLink: teleported player below world as fallback.");
+                }
+                catch (Exception ex)
+                {
+                    SafeLog("DeathLink fallback kill failed: " + ex.Message);
+                }
+            }
+
+            if (!killed)
+            {
                 _suppressOutgoingDeathLink = false;
-                SafeLog("DeathLink kill failed: " + ex.Message);
             }
         }
 
@@ -1114,12 +1227,23 @@ namespace CyberHookAP
                 }
             }
 
-            Discovery.AppendLine(
-                "completions.log",
-                DateTime.UtcNow.ToString("o")
-                + "\t" + level.LevelUniqueID
-                + "\ttime=" + finalTime.ToString("0.000")
-                + "\tstars=" + starsUnlocked.ToString());
+            if (IsOneMoreTimeFinalLevel(level))
+            {
+                RegisterCheck(level.LevelUniqueID + "::final_level_complete", "Final Level Complete");
+                RegisterCheck(level.LevelUniqueID + "::victory", "Victory");
+            }
+
+            UpdateArchipelagoBestTime(level, finalTime);
+
+            if (Settings.DiscoveryMode)
+            {
+                Discovery.AppendLine(
+                    "completions.log",
+                    DateTime.UtcNow.ToString("o")
+                    + "\t" + level.LevelUniqueID
+                    + "\ttime=" + finalTime.ToString("0.000")
+                    + "\tstars=" + starsUnlocked.ToString());
+            }
         }
 
         private int CalculateStarsForRun(SO_Level level, float finalTime)
@@ -1161,6 +1285,52 @@ namespace CyberHookAP
             return earned;
         }
 
+        private string GetArchipelagoBestTimeDisplay(SO_Level level)
+        {
+            float bestTime;
+            return TryGetArchipelagoBestTime(level, out bestTime)
+                ? FormatTimeSeconds(bestTime)
+                : "--:--.--";
+        }
+
+        private bool TryGetArchipelagoBestTime(SO_Level level, out float bestTime)
+        {
+            bestTime = 0f;
+            if (level == null || State == null || State.LevelBestTimes == null || string.IsNullOrEmpty(level.LevelUniqueID))
+            {
+                return false;
+            }
+
+            float stored;
+            if (!State.LevelBestTimes.TryGetValue(level.LevelUniqueID, out stored) || stored <= 0f)
+            {
+                return false;
+            }
+
+            bestTime = stored;
+            return true;
+        }
+
+        private void UpdateArchipelagoBestTime(SO_Level level, float finalTime)
+        {
+            if (level == null || State == null || finalTime <= 0f || string.IsNullOrEmpty(level.LevelUniqueID))
+            {
+                return;
+            }
+
+            if (State.LevelBestTimes == null)
+            {
+                State.LevelBestTimes = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+            }
+
+            float existing;
+            if (!State.LevelBestTimes.TryGetValue(level.LevelUniqueID, out existing) || existing <= 0f || finalTime < existing)
+            {
+                State.LevelBestTimes[level.LevelUniqueID] = finalTime;
+                PersistState();
+            }
+        }
+
         internal void OnCollectibleTouched(LevelCollectible collectible)
         {
             if (collectible == null)
@@ -1177,17 +1347,20 @@ namespace CyberHookAP
             object levelIdObj = AccessTools.Method(typeof(LevelCollectible), "GetLevelID").Invoke(collectible, new object[0]);
             string cubeFreeId = levelIdObj as string ?? string.Empty;
             string path = SceneObjectId.BuildTransformPath(collectible.transform);
-            string discoveryKey = level.LevelUniqueID + "::collectible::" + cubeFreeId + "::" + path;
-
-            if (State.KnownCollectibleIds.Add(discoveryKey))
+            if (Settings.DiscoveryMode)
             {
-                Discovery.AppendLine(
-                    "collectibles.log",
-                    DateTime.UtcNow.ToString("o") + "\t" + discoveryKey);
-                PersistState();
+                string discoveryKey = level.LevelUniqueID + "::collectible::" + cubeFreeId + "::" + path;
+
+                if (State.KnownCollectibleIds.Add(discoveryKey))
+                {
+                    Discovery.AppendLine(
+                        "collectibles.log",
+                        DateTime.UtcNow.ToString("o") + "\t" + discoveryKey);
+                    PersistState();
+                }
             }
 
-            if (Settings.EnableAnchorChecks
+            if (false && Settings.EnableAnchorChecks
                 && IsEligibleApLevel(level)
                 && level.TargetWorld != null
                 && level.TargetWorld.Index >= 0
@@ -1237,7 +1410,10 @@ namespace CyberHookAP
                 RegisterCheck(cubeId, "Cube check");
             }
 
-            Discovery.AppendLine("cubes.log", DateTime.UtcNow.ToString("o") + "\tbroken\t" + cubeId);
+            if (Settings.DiscoveryMode)
+            {
+                Discovery.AppendLine("cubes.log", DateTime.UtcNow.ToString("o") + "\tbroken\t" + cubeId);
+            }
         }
 
         internal void OnPlayerKilled(PlayerState playerState, GameObject killer)
@@ -1248,15 +1424,30 @@ namespace CyberHookAP
                 return;
             }
 
-            if (_suppressedResetDeathLinks > 0)
+            bool isResetDeath = Time.unscaledTime < _deathLinkRestartSuppressUntil;
+            if (!isResetDeath && _activeTrap != null && _activeTrap.RemainingDeaths > 0)
             {
-                _suppressedResetDeathLinks--;
+                _activeTrap.RemainingDeaths--;
+            }
+
+            if (isResetDeath)
+            {
                 return;
             }
 
             if (_slotData == null || !_slotData.DeathLinkEnabled || _apClient == null || !_apClient.IsAuthenticated)
             {
                 return;
+            }
+
+            if (!Settings.ClearedLevelsDeathLink)
+            {
+                SO_Level level = LevelManager.Instance != null ? LevelManager.Instance.LevelDataSO : null;
+                if (level != null && !string.IsNullOrEmpty(level.LevelUniqueID)
+                    && State.CompletedChecks.Contains(level.LevelUniqueID + "::rank::0"))
+                {
+                    return;
+                }
             }
 
             int amnesty = Mathf.Max(1, _slotData.DeathLinkAmnesty);
@@ -1286,7 +1477,8 @@ namespace CyberHookAP
 
         internal void SuppressNextResetDeathLink()
         {
-            _suppressedResetDeathLinks++;
+            _deathLinkRestartSuppressUntil = Time.unscaledTime + 5f;
+            _deathLinkAmnestyCounter = 0;
         }
 
         internal bool TryOverrideWorldUnlock(WorldDetail world, ref bool result)
@@ -1336,6 +1528,16 @@ namespace CyberHookAP
             if (level.TargetWorld == null)
             {
                 return false;
+            }
+
+            if (IsOneMoreTimeFinalLevel(level))
+            {
+                result = Settings.FinalLevelAccessible || AreAllOtherFinalWorldLevelsCompleted(level);
+                if (result)
+                {
+                    TryMarkLevelUnlocked(level);
+                }
+                return true;
             }
 
             bool worldUnlocked = false;
@@ -1398,6 +1600,13 @@ namespace CyberHookAP
                 return;
             }
 
+            if (IsOneMoreTimeFinalLevel(level))
+            {
+                bool unlocked = Settings.FinalLevelAccessible || AreAllOtherFinalWorldLevelsCompleted(level);
+                ForceLevelUnlockState(level, unlocked);
+                return;
+            }
+
             bool worldUnlocked = false;
             if (!TryOverrideLevelUnlock(level, ref worldUnlocked) || !worldUnlocked)
             {
@@ -1409,6 +1618,11 @@ namespace CyberHookAP
 
         private void TryMarkLevelUnlocked(SO_Level level)
         {
+            ForceLevelUnlockState(level, true);
+        }
+
+        private void ForceLevelUnlockState(SO_Level level, bool unlocked)
+        {
             if (level == null)
             {
                 return;
@@ -1419,13 +1633,69 @@ namespace CyberHookAP
                 LevelData data = level.SerializedData;
                 if (data != null)
                 {
-                    data.IsUnlocked = true;
+                    data.IsUnlocked = unlocked;
                 }
             }
             catch (Exception ex)
             {
-                SafeLog("Failed to mark level unlocked: " + ex.Message);
+                SafeLog("Failed to set level unlock state: " + ex.Message);
             }
+        }
+
+        private bool IsOneMoreTimeFinalLevel(SO_Level level)
+        {
+            return level != null
+                && !string.IsNullOrEmpty(level.LevelUniqueID)
+                && string.Equals(level.LevelUniqueID, ApData.OneMoreTimeLevelUniqueId, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private bool AreAllOtherFinalWorldLevelsCompleted(SO_Level currentLevel)
+        {
+            if (_cachedLevelpack == null)
+            {
+                return false;
+            }
+
+            List<SO_Level> allLevels = _cachedLevelpack.GetLevelListWithChildren;
+            if (allLevels == null)
+            {
+                return false;
+            }
+
+            for (int i = 0; i < allLevels.Count; i++)
+            {
+                SO_Level level = allLevels[i];
+                if (level == null
+                    || string.IsNullOrEmpty(level.LevelUniqueID)
+                    || level.TargetWorld == null
+                    || level.TargetWorld.Index != ApData.FinalWorldIndex)
+                {
+                    continue;
+                }
+
+                if (string.Equals(level.LevelUniqueID, currentLevel.LevelUniqueID, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (ApData.IsExcludedLevel(level.LevelUniqueID))
+                {
+                    continue;
+                }
+
+                if (IsHubLikeLevel(level))
+                {
+                    continue;
+                }
+
+                string clearCheckKey = level.LevelUniqueID + "::rank::0";
+                if (!State.CompletedChecks.Contains(clearCheckKey))
+                {
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         private SO_Level ResolveLevelByUniqueId(string levelUniqueId)
@@ -1728,6 +1998,7 @@ namespace CyberHookAP
 
             GUI.Label(new Rect(x, y, 240f, 20f), levelName, _hudLabelStyle);
             y += 22f;
+            DrawHudLine(x, ref y, "AP Best", GetArchipelagoBestTimeDisplay(level));
 
             if (stars.Length >= 4)
             {
@@ -1885,7 +2156,7 @@ namespace CyberHookAP
 
             if (_popupUi != null)
             {
-                _popupUi.gameObject.SetActive(Settings == null || Settings.EnableStatusHud);
+                _popupUi.gameObject.SetActive(true);
             }
         }
 
@@ -1899,6 +2170,76 @@ namespace CyberHookAP
             _apClient.SendText(text.Trim());
         }
 
+        private void UpdateLevelInfoPanel()
+        {
+            if (_popupUi == null)
+            {
+                return;
+            }
+
+            LevelManager levelManager = LevelManager.Instance;
+            if (levelManager == null || levelManager.LevelDataSO == null)
+            {
+                _popupUi.SetLevelInfo(string.Empty, string.Empty, string.Empty, string.Empty, string.Empty, string.Empty);
+                return;
+            }
+
+            SO_Level level = levelManager.LevelDataSO;
+            string levelUniqueId = level.LevelUniqueID ?? string.Empty;
+            if (levelUniqueId.Length == 0 || IsHubLikeLevel(level))
+            {
+                _popupUi.SetLevelInfo(string.Empty, string.Empty, string.Empty, string.Empty, string.Empty, string.Empty);
+                return;
+            }
+
+            bool cleared = State.CompletedChecks.Contains(levelUniqueId + "::rank::0");
+            string clearStatus = cleared ? "CLEARED" : "NOT CLEARED";
+
+            float bestTime;
+            string bestStr;
+            if (State.LevelBestTimes != null && State.LevelBestTimes.TryGetValue(levelUniqueId, out bestTime) && bestTime > 0f)
+            {
+                bestStr = FormatTimeSeconds(bestTime);
+            }
+            else
+            {
+                bestStr = "--:--.--";
+            }
+
+            float[] stars = level.Stars ?? new float[0];
+            string star1Str = "--:--.--";
+            string star2Str = "--:--.--";
+            string star3Str = "--:--.--";
+            if (stars.Length >= 4)
+            {
+                star1Str = stars[1] > 0f ? FormatTimeSeconds(stars[1]) : "--:--.--";
+                star2Str = stars[2] > 0f ? FormatTimeSeconds(stars[2]) : "--:--.--";
+                star3Str = stars[3] > 0f ? FormatTimeSeconds(stars[3]) : "--:--.--";
+            }
+            else if (stars.Length >= 3)
+            {
+                star1Str = stars[0] > 0f ? FormatTimeSeconds(stars[0]) : "--:--.--";
+                star2Str = stars[1] > 0f ? FormatTimeSeconds(stars[1]) : "--:--.--";
+                star3Str = stars[2] > 0f ? FormatTimeSeconds(stars[2]) : "--:--.--";
+            }
+
+            string levelName = level.LevelNameKey ?? "Unknown";
+            if (_generatedData != null)
+            {
+                string displayName;
+                if (_generatedData.TryGetLevelDisplayName(levelUniqueId, out displayName) && !string.IsNullOrEmpty(displayName))
+                {
+                    levelName = displayName;
+                }
+                else
+                {
+                    SafeLog("No display name for " + level.LevelNameKey + " (UUID " + levelUniqueId + ")");
+                }
+            }
+
+            _popupUi.SetLevelInfo(levelName, clearStatus, bestStr, star1Str, star2Str, star3Str);
+        }
+
         private void EnsureConnectionUuid()
         {
             if (Settings == null || Settings.Connection == null)
@@ -1910,6 +2251,227 @@ namespace CyberHookAP
             {
                 Settings.Connection.ClientUuid = Guid.NewGuid().ToString("N");
             }
+        }
+
+        private void TryLoadAmbientVisual()
+        {
+            if (!AuxVisualEnabled)
+            {
+                return;
+            }
+
+            _ambientFrames.Clear();
+            _ambientFrameDurations.Clear();
+            _ambientLoaded = false;
+
+            try
+            {
+                using (Stream resourceStream = typeof(CyberHookApMod).Assembly.GetManifestResourceStream(EmbeddedAuxVisualResource))
+                {
+                    if (resourceStream == null)
+                    {
+                        return;
+                    }
+
+                    using (MemoryStream copy = new MemoryStream())
+                    {
+                        resourceStream.CopyTo(copy);
+                        copy.Position = 0;
+
+                        using (SD.Image image = SD.Image.FromStream(copy))
+                        {
+                            FrameDimension dimension = new FrameDimension(image.FrameDimensionsList[0]);
+                            int frameCount = image.GetFrameCount(dimension);
+                            int[] delays = ExtractGifFrameDelays(image, frameCount);
+
+                            for (int i = 0; i < frameCount; i++)
+                            {
+                                image.SelectActiveFrame(dimension, i);
+                                using (SD.Bitmap bitmap = new SD.Bitmap(image.Width, image.Height))
+                                using (SD.Graphics graphics = SD.Graphics.FromImage(bitmap))
+                                {
+                                    graphics.Clear(SD.Color.Transparent);
+                                    graphics.DrawImage(image, 0, 0, image.Width, image.Height);
+
+                                    Texture2D frameTexture = ConvertBitmapToTexture(bitmap);
+                                    frameTexture.wrapMode = TextureWrapMode.Clamp;
+                                    frameTexture.filterMode = FilterMode.Bilinear;
+                                    _ambientFrames.Add(frameTexture);
+                                    _ambientFrameDurations.Add(Mathf.Max(0.02f, delays[i] / 100f));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                _ambientLoaded = _ambientFrames.Count > 0;
+            }
+            catch
+            {
+            }
+        }
+
+        private static int[] ExtractGifFrameDelays(SD.Image image, int frameCount)
+        {
+            int[] delays = new int[frameCount];
+            for (int i = 0; i < frameCount; i++)
+            {
+                delays[i] = 10;
+            }
+
+            const int frameDelayPropertyId = 0x5100;
+            if (image == null)
+            {
+                return delays;
+            }
+
+            try
+            {
+                if (Array.IndexOf(image.PropertyIdList, frameDelayPropertyId) < 0)
+                {
+                    return delays;
+                }
+
+                SD.Imaging.PropertyItem property = image.GetPropertyItem(frameDelayPropertyId);
+                if (property == null || property.Value == null)
+                {
+                    return delays;
+                }
+
+                int availableFrames = Math.Min(frameCount, property.Value.Length / 4);
+                for (int i = 0; i < availableFrames; i++)
+                {
+                    delays[i] = Math.Max(1, BitConverter.ToInt32(property.Value, i * 4));
+                }
+            }
+            catch
+            {
+            }
+
+            return delays;
+        }
+
+        private static Texture2D ConvertBitmapToTexture(SD.Bitmap bitmap)
+        {
+            int width = bitmap.Width;
+            int height = bitmap.Height;
+            Texture2D texture = new Texture2D(width, height, TextureFormat.ARGB32, false);
+            Color[] pixels = new Color[width * height];
+
+            for (int y = 0; y < height; y++)
+            {
+                int sourceY = height - 1 - y;
+                for (int x = 0; x < width; x++)
+                {
+                    SD.Color pixel = bitmap.GetPixel(x, sourceY);
+                    pixels[(y * width) + x] = new Color32(pixel.R, pixel.G, pixel.B, pixel.A);
+                }
+            }
+
+            texture.SetPixels(pixels);
+            texture.Apply(false, false);
+            return texture;
+        }
+
+        private void UpdateAmbientRuntime()
+        {
+            if (!AuxVisualEnabled)
+            {
+                return;
+            }
+
+            if (!_ambientLoaded)
+            {
+                return;
+            }
+
+            float deltaTime = Time.unscaledDeltaTime;
+            if (_ambientPlaying)
+            {
+                if (_ambientFrames.Count == 0)
+                {
+                    _ambientPlaying = false;
+                    return;
+                }
+
+                _ambientFrameRemainingSeconds -= deltaTime;
+                while (_ambientPlaying && _ambientFrameRemainingSeconds <= 0f)
+                {
+                    _ambientFrameIndex++;
+                    if (_ambientFrameIndex >= _ambientFrames.Count)
+                    {
+                        _ambientPlaying = false;
+                        _ambientFrameIndex = 0;
+                        _ambientFrameRemainingSeconds = 0f;
+                        break;
+                    }
+
+                    _ambientFrameRemainingSeconds += _ambientFrameDurations[_ambientFrameIndex];
+                }
+
+                return;
+            }
+
+            _ambientRollTimer += deltaTime;
+            if (_ambientRollTimer < ImportantUpdateRollIntervalSeconds)
+            {
+                return;
+            }
+
+            while (_ambientRollTimer >= ImportantUpdateRollIntervalSeconds)
+            {
+                _ambientRollTimer -= ImportantUpdateRollIntervalSeconds;
+                if (_ambientRandom.NextDouble() < ImportantUpdateRollChance)
+                {
+                    StartAmbientPlayback();
+                    break;
+                }
+            }
+        }
+
+        private void StartAmbientPlayback()
+        {
+            if (!AuxVisualEnabled)
+            {
+                return;
+            }
+
+            if (!_ambientLoaded || _ambientFrames.Count == 0)
+            {
+                return;
+            }
+
+            _ambientPlaying = true;
+            _ambientFrameIndex = 0;
+            _ambientFrameRemainingSeconds = _ambientFrameDurations[0];
+        }
+
+        private void DrawAmbientOverlay()
+        {
+            if (!AuxVisualEnabled)
+            {
+                return;
+            }
+
+            if (!_ambientPlaying
+                || _ambientFrameIndex < 0
+                || _ambientFrameIndex >= _ambientFrames.Count)
+            {
+                return;
+            }
+
+            Texture2D frame = _ambientFrames[_ambientFrameIndex];
+            if (frame == null)
+            {
+                return;
+            }
+
+            GUI.depth = -1000;
+            GUI.DrawTexture(
+                new Rect(0f, 0f, Screen.width, Screen.height),
+                frame,
+                ScaleMode.StretchToFill,
+                true);
         }
 
         private void TryLaunchLevelById(string levelId)
@@ -1958,6 +2520,9 @@ namespace CyberHookAP
             ClearTrapState(true);
             string seedName = payload != null ? payload.SeedName ?? string.Empty : string.Empty;
             string slotName = payload != null ? payload.SlotName ?? string.Empty : string.Empty;
+            SafeLog("AP connected: new seed=" + (seedName.Length > 0 ? seedName : "<empty>") + " slot=" + (slotName.Length > 0 ? slotName : "<empty>")
+                + " vs stored seed=" + (State.SessionSeedName.Length > 0 ? State.SessionSeedName : "<empty>")
+                + " slot=" + (State.SessionSlotName.Length > 0 ? State.SessionSlotName : "<empty>"));
             bool isNewSession =
                 !string.Equals(State.SessionSeedName, seedName, StringComparison.OrdinalIgnoreCase)
                 || !string.Equals(State.SessionSlotName, slotName, StringComparison.OrdinalIgnoreCase);
@@ -1965,6 +2530,8 @@ namespace CyberHookAP
             if (isNewSession)
             {
                 State.ResetForNewSession(seedName, slotName);
+                BackupAndResetSave(seedName, slotName);
+                ResetInMemoryLevelProgress();
                 SafeLog("Started new Archipelago session: seed=" + seedName + ", slot=" + slotName);
                 if (_popupUi != null)
                 {
@@ -1979,7 +2546,7 @@ namespace CyberHookAP
                 _generatedData.UpdateLocationMappings(locationMapToken);
             }
 
-            _slotData = ArchipelagoSlotData.FromToken(slotDataToken, _generatedData);
+            _slotData = ArchipelagoSlotData.FromToken(slotDataToken, _generatedData, Settings != null ? Settings.index_worlds_at : -1);
             _deathLinkAmnestyCounter = 0;
             if (_apClient != null)
             {
@@ -2050,7 +2617,6 @@ namespace CyberHookAP
         {
             if (!string.IsNullOrEmpty(message))
             {
-                SafeLog(message);
                 if (_popupUi != null)
                 {
                     _popupUi.ShowInfo("Archipelago", message);
@@ -2079,7 +2645,7 @@ namespace CyberHookAP
                 : (payload.Source + " sent a DeathLink.");
             _pendingDeathLinkMessage = message;
             _pendingIncomingDeathLink = true;
-            SafeLog("Received DeathLink: " + message);
+            SafeLog("Received DeathLink.");
             if (_popupUi != null)
             {
                 _popupUi.ShowInfo("DeathLink", message);
@@ -2117,26 +2683,21 @@ namespace CyberHookAP
             {
                 case "Star":
                     State.ReceivedDiamonds++;
-                    ShowPopup(PopupKind.Item, item.Name);
                     break;
                 case "Air Dash":
                     State.HasDoubleJump = true;
-                    ShowPopup(PopupKind.Item, item.Name);
                     QueuePowerupAnimationForItem(item.Name, allowTransientEffects);
                     break;
                 case "Wall Slide":
                     State.HasWallSlide = true;
-                    ShowPopup(PopupKind.Item, item.Name);
                     QueuePowerupAnimationForItem(item.Name, allowTransientEffects);
                     break;
                 case "Hook Pull":
                     State.HasHookPull = true;
-                    ShowPopup(PopupKind.Item, item.Name);
                     QueuePowerupAnimationForItem(item.Name, allowTransientEffects);
                     break;
                 case "Finger Gun":
                     State.HasShoot = true;
-                    ShowPopup(PopupKind.Item, item.Name);
                     QueuePowerupAnimationForItem(item.Name, allowTransientEffects);
                     break;
                 case "Progressive Time Warp":
@@ -2149,12 +2710,10 @@ namespace CyberHookAP
                         State.ProgressiveSlowmoTime = ApData.ClampProgressiveLevel(State.ProgressiveSlowmoTime + 1);
                     }
 
-                    ShowPopup(PopupKind.Item, item.Name + " Lv " + State.ProgressiveSlowmoTime.ToString());
                     QueuePowerupAnimationForItem(item.Name, allowTransientEffects);
                     break;
                 case "Progressive Hook Reach":
                     State.ProgressiveReach = ApData.ClampProgressiveLevel(State.ProgressiveReach + 1);
-                    ShowPopup(PopupKind.Item, item.Name + " Lv " + State.ProgressiveReach.ToString());
                     QueuePowerupAnimationForItem(item.Name, allowTransientEffects);
                     break;
                 case "Random Gravity Direction Trap":
@@ -2169,13 +2728,13 @@ namespace CyberHookAP
                         QueueTrap(TrapKind.IncreasedGravity, item.Name);
                     }
                     break;
+                case "Final Level Complete":
+                    State.HasFinalLevelComplete = true;
+                    break;
                 default:
                     SafeLog("Received Archipelago item without gameplay handling yet: " + item.Name);
-                    ShowPopup(PopupKind.Info, item.Name);
                     break;
             }
-
-            SafeLog("Received Archipelago item: " + item.Name);
             _lastAppliedPlayer = null;
             _lastAppliedSignature = string.Empty;
         }
@@ -2258,10 +2817,6 @@ namespace CyberHookAP
         private bool IsGoalSatisfied()
         {
             string goalMode = _slotData.GoalMode ?? string.Empty;
-            if (goalMode.Length == 0)
-            {
-                return false;
-            }
 
             if (string.Equals(goalMode, "chosen_goal_levels", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(goalMode, "goal_levels", StringComparison.OrdinalIgnoreCase))
@@ -2290,6 +2845,11 @@ namespace CyberHookAP
                 return State.ReceivedDiamonds >= _slotData.GoalDiamondCount && _slotData.GoalDiamondCount > 0;
             }
 
+            if (State.HasFinalLevelComplete)
+            {
+                return true;
+            }
+
             return false;
         }
 
@@ -2297,29 +2857,13 @@ namespace CyberHookAP
         {
             if (State.CompletedChecks.Add(checkId))
             {
-                Discovery.AppendLine("checks.log", DateTime.UtcNow.ToString("o") + "\t" + checkId);
-                SafeLog(label + " completed: " + checkId);
-                ShowCheckPopup(checkId);
+                if (Settings.DiscoveryMode)
+                {
+                    Discovery.AppendLine("checks.log", DateTime.UtcNow.ToString("o") + "\t" + checkId);
+                }
+
                 TrySendCheckToArchipelago(checkId);
                 PersistState();
-            }
-        }
-
-        private void ShowCheckPopup(string checkId)
-        {
-            if (_popupUi == null || _generatedData == null || string.IsNullOrEmpty(checkId))
-            {
-                return;
-            }
-
-            GeneratedApLocation location;
-            if (_generatedData.TryGetLocation(checkId, out location) && location != null && !string.IsNullOrEmpty(location.Name))
-            {
-                _popupUi.ShowCheck(location.Name);
-            }
-            else
-            {
-                _popupUi.ShowCheck(checkId);
             }
         }
 
@@ -2397,6 +2941,403 @@ namespace CyberHookAP
             _baseHookRange = player.Hook.MaxChainLength;
             _baseTimeWarpChainBonus = player.Hook.TimeWarpChainBonus;
             _capturedBaseValues = true;
+        }
+
+        private void BackupAndResetSave(string seedName, string slotName)
+        {
+            if (Settings.SkipSaveReset)
+            {
+                SafeLog("Save reset skipped (Disable Save Reset is enabled).");
+                return;
+            }
+            string saveRoot = Path.Combine(Application.dataPath, "CyberHook");
+            SafeLog("Save reset: using save root " + saveRoot);
+            if (!Directory.Exists(saveRoot) || !File.Exists(Path.Combine(saveRoot, "GameData.shd")))
+            {
+                SafeLog("Save root not found or missing GameData.shd; skipping save backup and reset.");
+                return;
+            }
+
+            string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+            string safeSeed = SanitizeSavePathPart(seedName);
+            string safeSlot = SanitizeSavePathPart(slotName);
+            string backupDir = Path.Combine(DataDirectory, "Backups", safeSeed + "_" + safeSlot + "_" + timestamp);
+            Directory.CreateDirectory(backupDir);
+
+            string gameDataFile = Path.Combine(saveRoot, "GameData.shd");
+            string levelsDir = Path.Combine(saveRoot, "Levels");
+            string marathonFile = Path.Combine(saveRoot, "MarathonData.shm");
+
+            SafeFileCopy(gameDataFile, Path.Combine(backupDir, "GameData.shd"));
+            SafeFileCopy(marathonFile, Path.Combine(backupDir, "MarathonData.shm"));
+            if (Directory.Exists(levelsDir))
+            {
+                string backupLevelsDir = Path.Combine(backupDir, "Levels");
+                Directory.CreateDirectory(backupLevelsDir);
+                foreach (string file in Directory.GetFiles(levelsDir))
+                {
+                    SafeFileCopy(file, Path.Combine(backupLevelsDir, Path.GetFileName(file)));
+                }
+            }
+
+            if (File.Exists(gameDataFile))
+            {
+                if (!ExtractBootstrapGameData(gameDataFile))
+                {
+                    try
+                    {
+                        object fresh = CreateFreshGameData(gameDataFile);
+                        if (fresh != null)
+                        {
+                            BinaryFormatter formatter = new BinaryFormatter();
+                            using (FileStream stream = File.Create(gameDataFile))
+                            {
+                                formatter.Serialize(stream, fresh);
+                            }
+                            SafeLog("Created blank GameData (no bootstrap embedded).");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        SafeLog("Failed to write fresh GameData: " + ex.Message);
+                    }
+                }
+            }
+
+            if (Directory.Exists(levelsDir))
+            {
+                try
+                {
+                    foreach (string file in Directory.GetFiles(levelsDir, "*.shl"))
+                    {
+                        File.Delete(file);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    SafeLog("Failed to clear level save files: " + ex.Message);
+                }
+
+                ExtractBootstrapLevelFiles(levelsDir);
+            }
+
+            SafeLog("Save backed up to " + backupDir + " and reset.");
+        }
+
+        private bool ExtractBootstrapGameData(string targetPath)
+        {
+            try
+            {
+                using (Stream stream = typeof(CyberHookApMod).Assembly.GetManifestResourceStream(BootstrapGameDataResource))
+                {
+                    if (stream == null)
+                    {
+                        return false;
+                    }
+
+                    using (FileStream outFile = File.Create(targetPath))
+                    {
+                        stream.CopyTo(outFile);
+                    }
+
+                    SafeLog("Wrote bootstrap GameData to " + targetPath);
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                SafeLog("Failed to extract bootstrap GameData: " + ex.Message);
+                return false;
+            }
+        }
+
+        private void ExtractBootstrapLevelFiles(string levelsDir)
+        {
+            for (int i = 0; i < BootstrapLevelUuids.Length; i++)
+            {
+                string resourceName = "CyberHookAP.Runtime.bootstrap_level_" + i.ToString();
+                try
+                {
+                    using (Stream stream = typeof(CyberHookApMod).Assembly.GetManifestResourceStream(resourceName))
+                    {
+                        if (stream == null)
+                        {
+                            continue;
+                        }
+
+                        string fileName = "LevelData # " + BootstrapLevelUuids[i] + ".shl";
+                        string targetPath = Path.Combine(levelsDir, fileName);
+                        using (FileStream outFile = File.Create(targetPath))
+                        {
+                            stream.CopyTo(outFile);
+                        }
+
+                        SafeLog("Wrote bootstrap level file: " + fileName);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    SafeLog("Failed to extract bootstrap level " + i.ToString() + ": " + ex.Message);
+                }
+            }
+        }
+
+        private void UpdateRestoreBackupTriggers()
+        {
+            if (Settings == null || _settingsStore == null)
+            {
+                return;
+            }
+
+            if (Settings.RestoreLatestBackupTrigger)
+            {
+                Settings.RestoreLatestBackupTrigger = false;
+                _settingsStore.Save(Settings);
+                RestoreBackup(latest: true);
+            }
+
+            if (Settings.RestoreEarliestBackupTrigger)
+            {
+                Settings.RestoreEarliestBackupTrigger = false;
+                _settingsStore.Save(Settings);
+                RestoreBackup(latest: false);
+            }
+        }
+
+        private void RestoreBackup(bool latest)
+        {
+            string backupsDir = Path.Combine(DataDirectory, "Backups");
+            if (!Directory.Exists(backupsDir))
+            {
+                SafeLog("No backups directory found.");
+                return;
+            }
+
+            DirectoryInfo[] backupDirs = new DirectoryInfo(backupsDir).GetDirectories();
+            if (backupDirs.Length == 0)
+            {
+                SafeLog("No backups available.");
+                return;
+            }
+
+            DirectoryInfo target;
+            if (latest)
+            {
+                System.Array.Sort(backupDirs, (a, b) => b.LastWriteTimeUtc.CompareTo(a.LastWriteTimeUtc));
+                target = backupDirs[0];
+            }
+            else
+            {
+                System.Array.Sort(backupDirs, (a, b) => a.CreationTimeUtc.CompareTo(b.CreationTimeUtc));
+                target = backupDirs[0];
+            }
+
+            string saveRoot = Path.Combine(Application.dataPath, "CyberHook");
+            string gameDataFile = Path.Combine(target.FullName, "GameData.shd");
+            string marathonFile = Path.Combine(target.FullName, "MarathonData.shm");
+            string backupLevelsDir = Path.Combine(target.FullName, "Levels");
+
+            if (!File.Exists(gameDataFile))
+            {
+                SafeLog("Backup " + target.Name + " is missing GameData.shd; cannot restore.");
+                return;
+            }
+
+            SafeFileCopy(gameDataFile, Path.Combine(saveRoot, "GameData.shd"));
+            SafeFileCopy(marathonFile, Path.Combine(saveRoot, "MarathonData.shm"));
+
+            if (Directory.Exists(backupLevelsDir))
+            {
+                string liveLevelsDir = Path.Combine(saveRoot, "Levels");
+                try
+                {
+                    foreach (string file in Directory.GetFiles(liveLevelsDir, "*.shl"))
+                    {
+                        File.Delete(file);
+                    }
+                }
+                catch
+                {
+                }
+
+                foreach (string file in Directory.GetFiles(backupLevelsDir, "*.shl", SearchOption.TopDirectoryOnly))
+                {
+                    SafeFileCopy(file, Path.Combine(liveLevelsDir, Path.GetFileName(file)));
+                }
+            }
+
+            SafeLog("Restored " + (latest ? "latest" : "earliest") + " backup: " + target.Name);
+        }
+
+        private void ResetInMemoryLevelProgress()
+        {
+            try
+            {
+                SO_Level[] levels = Resources.FindObjectsOfTypeAll<SO_Level>();
+                if (levels != null && levels.Length > 0)
+                {
+                    foreach (SO_Level level in levels)
+                    {
+                        if (level == null)
+                        {
+                            continue;
+                        }
+
+                    try
+                    {
+                        LevelData data = level.SerializedData;
+                        if (data != null && !IsBootstrapTrainingLevel(level.LevelUniqueID))
+                        {
+                            data.IsUnlocked = level.IsAlwaysUnlocked;
+                        }
+                    }
+                        catch
+                        {
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                SafeLog("Failed to reset in-memory level progress: " + ex.Message);
+            }
+
+            try
+            {
+                if (HasEmbeddedBootstrapGameData())
+                {
+                    SafeLog("Bootstrap GameData embedded; skipping in-memory GameData reset.");
+                }
+                else
+                {
+                    Type gameDataType = typeof(GameData);
+                    FieldInfo[] staticFields = gameDataType.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+                    object gameDataInstance = null;
+                    for (int i = 0; i < staticFields.Length; i++)
+                    {
+                        if (staticFields[i].FieldType == gameDataType)
+                        {
+                            gameDataInstance = staticFields[i].GetValue(null);
+                            break;
+                        }
+                    }
+
+                    if (gameDataInstance == null)
+                    {
+                        UnityEngine.Object[] candidates = Resources.FindObjectsOfTypeAll(gameDataType);
+                        if (candidates != null && candidates.Length > 0)
+                        {
+                            gameDataInstance = candidates[0];
+                        }
+                    }
+
+                    if (gameDataInstance != null)
+                    {
+                        object fresh = Activator.CreateInstance(gameDataType);
+                        CopyDefaultGameDataField(gameDataType, gameDataInstance, fresh, "TutorialPhaseDone");
+                        CopyDefaultGameDataField(gameDataType, gameDataInstance, fresh, "StoryIndexShown");
+                        CopyDefaultGameDataField(gameDataType, gameDataInstance, fresh, "StoryIndexRequested");
+                        CopyDefaultGameDataField(gameDataType, gameDataInstance, fresh, "StoryProgression");
+                        CopyDefaultGameDataField(gameDataType, gameDataInstance, fresh, "LevelSelectIndexShown");
+                        CopyDefaultGameDataField(gameDataType, gameDataInstance, fresh, "LevelSelectIndexRequested");
+                        CopyDefaultGameDataField(gameDataType, gameDataInstance, fresh, "UnlockedCollectiblesID");
+                        CopyDefaultGameDataField(gameDataType, gameDataInstance, fresh, "AutoSkipIntro");
+                        SafeLog("In-memory GameData progress reset.");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                SafeLog("Failed to reset in-memory GameData: " + ex.Message);
+            }
+        }
+
+        private static void CopyDefaultGameDataField(Type type, object target, object source, string fieldName)
+        {
+            FieldInfo field = type.GetField(fieldName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            if (field != null)
+            {
+                field.SetValue(target, field.GetValue(source));
+            }
+        }
+
+        private static bool HasEmbeddedBootstrapGameData()
+        {
+            using (Stream stream = typeof(CyberHookApMod).Assembly.GetManifestResourceStream(BootstrapGameDataResource))
+            {
+                return stream != null;
+            }
+        }
+
+        private static bool IsBootstrapTrainingLevel(string levelUniqueId)
+        {
+            if (string.IsNullOrEmpty(levelUniqueId))
+            {
+                return false;
+            }
+
+            for (int i = 0; i < BootstrapLevelUuids.Length; i++)
+            {
+                if (string.Equals(levelUniqueId, BootstrapLevelUuids[i], StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static object CreateFreshGameData(string existingPath)
+        {
+            BinaryFormatter formatter = new BinaryFormatter();
+            using (FileStream stream = File.OpenRead(existingPath))
+            {
+                object existing = formatter.Deserialize(stream);
+                if (existing != null)
+                {
+                    return Activator.CreateInstance(existing.GetType());
+                }
+            }
+
+            return null;
+        }
+
+        private static void SafeFileCopy(string source, string dest)
+        {
+            try
+            {
+                if (File.Exists(source))
+                {
+                    File.Copy(source, dest, true);
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        private static string SanitizeSavePathPart(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                return "unknown";
+            }
+
+            char[] invalid = Path.GetInvalidFileNameChars();
+            char[] chars = value.ToCharArray();
+            for (int i = 0; i < chars.Length; i++)
+            {
+                for (int j = 0; j < invalid.Length; j++)
+                {
+                    if (chars[i] == invalid[j])
+                    {
+                        chars[i] = '_';
+                        break;
+                    }
+                }
+            }
+
+            return new string(chars);
         }
     }
 }
