@@ -2238,6 +2238,11 @@ namespace CyberHookAP
             }
 
             _popupUi.SetLevelInfo(levelName, clearStatus, bestStr, star1Str, star2Str, star3Str);
+
+            bool dlEnabled = _slotData != null && _slotData.DeathLinkEnabled && _apClient != null && _apClient.IsAuthenticated;
+            int dlAmnesty = _slotData != null ? Mathf.Max(1, _slotData.DeathLinkAmnesty) : 1;
+            int dlRemaining = dlAmnesty - _deathLinkAmnestyCounter;
+            _popupUi.SetDeathLinkInfo(dlEnabled, dlRemaining);
         }
 
         private void EnsureConnectionUuid()

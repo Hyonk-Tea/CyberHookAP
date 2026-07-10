@@ -55,6 +55,8 @@ namespace CyberHookAP
         private TextMeshProUGUI _levelStar1Text;
         private TextMeshProUGUI _levelStar2Text;
         private TextMeshProUGUI _levelStar3Text;
+        private TextMeshProUGUI _deathLinkLabel;
+        private TextMeshProUGUI _deathLinkCount;
 
         internal static EventPopupUi Instance
         {
@@ -411,6 +413,24 @@ namespace CyberHookAP
             star3Rect.offsetMax = Vector2.zero;
             _levelStar3Text.alignment = TextAlignmentOptions.MidlineLeft;
             _levelStar3Text.color = new Color(0.40f, 0.65f, 0.85f, 1f);
+
+            _deathLinkLabel = CreateText("DeathLinkLabel", levelBodyObj.transform, string.Empty, 13f, FontStyles.Bold);
+            RectTransform dlLabelRect = _deathLinkLabel.rectTransform;
+            dlLabelRect.anchorMin = new Vector2(0.55f, 0.55f);
+            dlLabelRect.anchorMax = new Vector2(1f, 1f);
+            dlLabelRect.offsetMin = Vector2.zero;
+            dlLabelRect.offsetMax = Vector2.zero;
+            _deathLinkLabel.alignment = TextAlignmentOptions.TopRight;
+            _deathLinkLabel.color = new Color(1f, 0.42f, 0.36f, 1f);
+
+            _deathLinkCount = CreateText("DeathLinkCount", levelBodyObj.transform, string.Empty, 24f, FontStyles.Bold);
+            RectTransform dlCountRect = _deathLinkCount.rectTransform;
+            dlCountRect.anchorMin = new Vector2(0.55f, 0f);
+            dlCountRect.anchorMax = new Vector2(1f, 0.55f);
+            dlCountRect.offsetMin = Vector2.zero;
+            dlCountRect.offsetMax = Vector2.zero;
+            _deathLinkCount.alignment = TextAlignmentOptions.TopRight;
+            _deathLinkCount.color = new Color(1f, 0.42f, 0.36f, 1f);
         }
 
         private void AppendLogLine(PopupKind kind, string message)
@@ -588,6 +608,8 @@ namespace CyberHookAP
             RefreshResolvedFont(_levelStar1Text);
             RefreshResolvedFont(_levelStar2Text);
             RefreshResolvedFont(_levelStar3Text);
+            RefreshResolvedFont(_deathLinkLabel);
+            RefreshResolvedFont(_deathLinkCount);
             if (_inputField != null)
             {
                 RefreshResolvedFont(_inputField.textComponent as TextMeshProUGUI);
@@ -814,6 +836,32 @@ namespace CyberHookAP
             if (_levelStar1Text != null) _levelStar1Text.text = "1 star:  " + (star1 ?? "--");
             if (_levelStar2Text != null) _levelStar2Text.text = "2 stars: " + (star2 ?? "--");
             if (_levelStar3Text != null) _levelStar3Text.text = "3 stars: " + (star3 ?? "--");
+        }
+
+        internal void SetDeathLinkInfo(bool enabled, int remaining)
+        {
+            if (_deathLinkLabel == null || _deathLinkCount == null)
+            {
+                return;
+            }
+
+            if (!enabled)
+            {
+                _deathLinkLabel.text = string.Empty;
+                _deathLinkCount.text = string.Empty;
+                return;
+            }
+
+            _deathLinkLabel.text = "DEATHLINK";
+            _deathLinkCount.text = remaining.ToString();
+            if (remaining <= 1)
+            {
+                _deathLinkCount.color = new Color(1f, 0.35f, 0.30f, 1f);
+            }
+            else
+            {
+                _deathLinkCount.color = new Color(0.6f, 0.6f, 0.6f, 1f);
+            }
         }
     }
 }
