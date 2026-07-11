@@ -1,6 +1,6 @@
 # Cyber Hook AP
 
-Read `setup_en.md` for an installation guide.
+Read [setup_en.md](setup_en.md) for an installation guide.
 
 Download the APWorld from [PieOrPi's repository](https://github.com/Hyonk-Tea/CyberHookAP)
 
